@@ -1,28 +1,42 @@
 import discord
 import os
-from dotenv import load_dotenv
-load_dotenv()
-from discord import app_commands
-from discord.ext import commands
-from datetime import datetime
 import sqlite3
+import qrcode
+import atexit
+import secrets
+import string
+from io import BytesIO
+from dotenv import load_dotenv
+from datetime import datetime
+from discord.ext import commands
+from discord import app_commands
+
+# ======================
+# ENV
+# ======================
+load_dotenv()
+TOKEN = os.getenv("DISCORD_TOKEN")
 
 GUILD_ID = 877372951064875038
 SALON_BON_ID = 1455933702692667412
-ROLE_AUTORISE_ID = 1455947238340558939
 SALON_LOG_ID = 1455951537380655338
+
+ROLE_AUTORISE_ID = 1455947238340558939
+ROLE_BONS_ID = 1456071275830186035
+
+STATE_FILE = "bot_state.txt"
 
 # ======================
 # INTENTS
 # ======================
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True  # essentiel pour récupérer les rôles correctement
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ======================
-# BASE DE DONNÉES
+# DATABASE
 # ======================
 db = sqlite3.connect("bons.db")
 cursor = db.cursor()
@@ -37,21 +51,35 @@ CREATE TABLE IF NOT EXISTS bons (
     valeur TEXT,
     date TEXT,
     auteur TEXT,
-    image_url TEXT
+    image_url TEXT,
+    statut TEXT
 )
 """)
 db.commit()
 
-def generer_numero_bon():
-    cursor.execute("SELECT COUNT(*) FROM bons")
-    count = cursor.fetchone()[0] + 1
-    annee = datetime.now().year
-    return f"BON-{annee}-{count:04d}"
+# ======================
+# MÉMOIRE TEMPORAIRE
+# ======================
+bons_en_attente = {}
 
 # ======================
-# LOGGING
+# UTILS
 # ======================
-async def log_action(bot, message):
+
+def generer_numero_bon():
+    alphabet = string.ascii_uppercase + string.digits
+    code = ''.join(secrets.choice(alphabet) for _ in range(10))
+    return f"BON-{code}"
+
+
+def generer_qr(data: str):
+    qr = qrcode.make(data)
+    buffer = BytesIO()
+    qr.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+async def log_action(message):
     salon = bot.get_channel(SALON_LOG_ID)
     if salon:
         await salon.send(message)
@@ -62,125 +90,170 @@ async def log_action(bot, message):
 class BonModal(discord.ui.Modal, title="Bon d'achat"):
     prenom = discord.ui.TextInput(label="Prénom")
     nom = discord.ui.TextInput(label="Nom")
-    telephone = discord.ui.TextInput(label="Numéro de téléphone")
+    telephone = discord.ui.TextInput(label="Téléphone")
     valeur = discord.ui.TextInput(label="Valeur du bon")
 
     async def on_submit(self, interaction: discord.Interaction):
-        date_now = datetime.now().strftime("%d/%m/%Y à %H:%M")
         numero = generer_numero_bon()
+        date_now = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+        bons_en_attente[interaction.user.id] = {
+            "numero": numero,
+            "prenom": self.prenom.value,
+            "nom": self.nom.value,
+            "telephone": self.telephone.value,
+            "valeur": self.valeur.value,
+            "date": date_now,
+            "auteur": str(interaction.user)
+        }
 
         await interaction.response.send_message(
-            f"🧾 **Bon {numero} créé**\n"
-            "📸 Merci d’envoyer maintenant la photo de la facture.",
+            f"🧾 **Bon {numero} créé**\n📸 Envoie maintenant la photo de la facture.",
             ephemeral=True
         )
 
-        def check(msg):
-            return (
-                msg.author == interaction.user
-                and msg.attachments
-                and msg.channel == interaction.channel
-            )
+# ======================
+# CAPTURE IMAGE
+# ======================
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
 
-        try:
-            msg = await bot.wait_for("message", check=check, timeout=120)
-            image = msg.attachments[0]
+    data = bons_en_attente.get(message.author.id)
+    if not data or not message.attachments:
+        return
 
-            cursor.execute("""
-            INSERT INTO bons VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                numero,
-                self.prenom.value,
-                self.nom.value,
-                self.telephone.value,
-                self.valeur.value,
-                date_now,
-                str(interaction.user),
-                image.url
-            ))
-            db.commit()
+    image = message.attachments[0]
 
-            salon = bot.get_channel(SALON_BON_ID)
+    try:
+        await message.delete()
+    except:
+        pass
 
-            embed = discord.Embed(
-                title="🎟️ Nouveau bon d'achat",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Numéro du bon", value=numero, inline=False)
-            embed.add_field(name="Prénom", value=self.prenom.value, inline=True)
-            embed.add_field(name="Nom", value=self.nom.value, inline=True)
-            embed.add_field(name="Téléphone", value=self.telephone.value, inline=False)
-            embed.add_field(name="Valeur", value=self.valeur.value, inline=False)
-            embed.add_field(name="Date", value=date_now, inline=False)
-            embed.set_footer(text=f"Créé par {interaction.user}")
-            embed.set_image(url=image.url)
+    statut = "EN_ATTENTE"
 
-            await salon.send(embed=embed)
+    cursor.execute("""
+    INSERT INTO bons VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        data["numero"],
+        data["prenom"],
+        data["nom"],
+        data["telephone"],
+        data["valeur"],
+        data["date"],
+        data["auteur"],
+        image.url,
+        statut
+    ))
+    db.commit()
 
-            await interaction.followup.send(
-                f"✅ Bon **{numero}** envoyé avec succès.",
-                ephemeral=True
-            )
+    del bons_en_attente[message.author.id]
 
-            # Logging
-            await log_action(
-                bot,
-                f"🎟️ **Nouveau bon créé**\n"
-                f"👤 Prénom : {self.prenom.value}\n"
-                f"👤 Nom : {self.nom.value}\n"
-                f"📞 Téléphone : `{self.telephone.value}`\n"
-                f"📄 Numéro : `{numero}`\n"
-                f"👤 Par : {interaction.user} ({interaction.user.id})\n"
-                f"💰 Valeur : {self.valeur.value}\n"
-                f"🕒 {date_now}"
-            )
+    qr_buffer = generer_qr(
+        f"http://127.0.0.1:8080/bon/{data['numero']}"
+    )
 
-        except Exception:
-            await interaction.followup.send(
-                "❌ Temps écoulé, aucune image reçue.",
-                ephemeral=True
-            )
+
+    file = discord.File(fp=qr_buffer, filename="qr.png")
+
+    embed = discord.Embed(
+        title="🎟️ Nouveau bon d'achat",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="Numéro", value=data["numero"], inline=False)
+    embed.add_field(name="Client", value=f"{data['prenom']} {data['nom']}", inline=False)
+    embed.add_field(name="Téléphone", value=data["telephone"], inline=False)
+    embed.add_field(name="Valeur", value=data["valeur"], inline=False)
+    embed.add_field(name="Statut", value=statut, inline=False)
+    embed.add_field(name="Date", value=data["date"], inline=False)
+    embed.set_image(url=image.url)
+    embed.set_thumbnail(url="attachment://qr.png")
+
+    salon = bot.get_channel(SALON_BON_ID)
+    await salon.send(embed=embed, file=file)
+
+    await log_action(
+        f"🎟️ **Nouveau bon créé**\n"
+        f"📄 Numéro : `{data['numero']}`\n"
+        f"👤 Client : {data['prenom']} {data['nom']}\n"
+        f"👤 Par : {message.author}\n"
+        f"💰 Valeur : {data['valeur']}\n"
+        f"🕒 {data['date']}"
+    )
 
 # ======================
-# COMMANDE /bon
+# COMMANDES
 # ======================
-@bot.tree.command(name="bon", description="Créer un bon de réduction")
+@bot.tree.command(name="bon", description="Créer un bon")
+@app_commands.checks.has_role(ROLE_AUTORISE_ID)
 async def bon(interaction: discord.Interaction):
-    guild = bot.get_guild(GUILD_ID)
-    member = guild.get_member(interaction.user.id)
 
-    if not member:
+    if interaction.channel.id != SALON_BON_ID:
         await interaction.response.send_message(
-            "⚠️ Impossible de récupérer vos rôles.",
+            "⛔ Cette commande est utilisable uniquement dans le salon des bons.",
             ephemeral=True
         )
         return
 
-    role = discord.utils.get(member.roles, id=ROLE_AUTORISE_ID)
-    if not role:
-        await interaction.response.send_message(
-            "⛔ Vous n’avez pas la permission d’utiliser cette commande.",
-            ephemeral=True
-        )
-        await log_action(
-            bot,
-            f"⛔ **Accès refusé**\n👤 {interaction.user} ({interaction.user.id})"
-        )
-        return
-
-    # Si autorisé, on envoie le modal
     await interaction.response.send_modal(BonModal())
 
+@bot.tree.command(name="bons", description="Lister les bons")
+@app_commands.checks.has_role(ROLE_BONS_ID)
+async def bons(interaction: discord.Interaction):
+
+    if interaction.channel.id != SALON_LOG_ID:
+        await interaction.response.send_message(
+            "⛔ Cette commande est utilisable uniquement dans le salon des logs.",
+            ephemeral=True
+        )
+        return
+
+    cursor.execute("""
+    SELECT numero, valeur, statut, prenom, nom
+    FROM bons
+    ORDER BY id DESC
+    LIMIT 10
+    """)
+    rows = cursor.fetchall()
+
+    if not rows:
+        await interaction.response.send_message("📭 Aucun bon.", ephemeral=True)
+        return
+
+    msg = "🎟️ **Derniers bons enregistrés**\n\n"
+    for n, v, s, p, nom in rows:
+        msg += f"• `{n}` | {v}€ | **{s}** | {p} {nom}\n"
+
+    await interaction.response.send_message(msg)
+
 # ======================
-# EVENT ON_READY
+# READY (LOG FIABLE)
 # ======================
 @bot.event
 async def on_ready():
+    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    if os.path.exists(STATE_FILE):
+        await log_action(
+            "🔴 **Bot arrêté précédemment (crash ou arrêt détecté)**\n"
+            f"🕒 {now}"
+        )
+
+    with open(STATE_FILE, "w") as f:
+        f.write("ONLINE")
+
     print(f"✅ Bot connecté : {bot.user}")
     await bot.tree.sync()
-    await log_action(
-        bot,
-        f"🟢 **Bot démarré**\n🕒 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
-    )
+    await log_action(f"🟢 **Bot démarré**\n🕒 {now}")
 
-bot.run(os.getenv('DISCORD_TOKEN'))
+# ======================
+# CLEAN EXIT (OPTIONNEL)
+# ======================
+def clean_exit():
+    if os.path.exists(STATE_FILE):
+        os.remove(STATE_FILE)
+
+atexit.register(clean_exit)
+
+bot.run(TOKEN)
