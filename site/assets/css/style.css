@@ -1,0 +1,86 @@
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    height: 100vh;
+    background: black;
+    font-family: Arial, sans-serif;
+    color: white;
+}
+
+.hero {
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at center, #120000, #000 70%);
+}
+
+.content {
+    text-align: center;
+    padding: 20px;
+}
+
+.title {
+    font-size: 64px;
+    font-weight: bold;
+    color: #ffb000;
+    letter-spacing: 4px;
+    text-shadow: 0 0 25px rgba(255, 180, 0, 0.9);
+    margin-bottom: 0;
+}
+
+.subtitle {
+    margin-top: 5px;
+    font-size: 20px;
+    letter-spacing: 6px;
+    color: #ff3b00;
+}
+
+.tagline {
+    margin: 25px 0 35px;
+    font-size: 14px;
+    color: #ddd;
+}
+
+.voucher-form {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.voucher-form input {
+    width: 320px;
+    max-width: 90%;
+    padding: 14px;
+    background: #000;
+    border: 2px solid #ff4500;
+    color: #ffcc00;
+    font-size: 14px;
+    margin-bottom: 18px;
+    outline: none;
+}
+
+.voucher-form input::placeholder {
+    color: #777;
+}
+
+.voucher-form button {
+    width: 320px;
+    max-width: 90%;
+    padding: 14px;
+    background: transparent;
+    border: 2px solid #ff4500;
+    color: #ffcc00;
+    font-weight: bold;
+    letter-spacing: 2px;
+    cursor: pointer;
+    transition: 0.3s;
+}
+
+.voucher-form button:hover {
+    background: #ff4500;
+    color: black;
+    box-shadow: 0 0 2
